@@ -12,6 +12,7 @@
 * found here.  USe the .txt file as the .hex file appears empty.      *
 * https://github.com/SpiceWire/davis-vantage-pro2-datalogger-emulator *
 *                                                                     *
+*                                                                     *
 ***********************************************************************/
 
 /*
