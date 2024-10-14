@@ -71,7 +71,7 @@ const uint8_t lookup[256] PROGMEM = {
 
 /*
 * This code will use a fixed security response instead of a randoom response
-* Both methods appear to work but the randon esponse is "cooler" :-)
+* Both methods appear to work but the randon response is "cooler" :-)
 *
 const uint8_t SECURITY_REGISTER_DATA[128] = {
 0x80, 0x2D, 0x22, 0x6F, 0x52, 0x6F, 0x98, 0xA9, 0x21, 0x25, 0x5E, 0x2D, 0x2D, 0x31, 0xD2, 0x39,
@@ -137,28 +137,26 @@ void init_registers() {
 }
 
 void wait_for_ss(void) {
-  while (PINB & SS) { /* wait for Select to go low */ }
+  while (PINB & SS) { /* wait for chip select to go low */ }
 }
 
 bool chip_select(void) {
-  return(!(PINB & SS));  /* wait for Select to go low */
+  return(!(PINB & SS));  /* wait for chip select to go low */
 }
 
 void reset_ovfl(void) {
-  USISR = OVFL;   // reset USIOIE flag (counter overflow / byte ready)
+  USISR = OVFL;   // reset USIOIE flag (counter overflow / byte ready), clear clk counter
 }
-
-//void wait_for_spi(void) {
-//  while( !(USISR & OVFL)) {/* wait for SPI byte ready*/}
-//  cmd = USIDR;
-//  reset_ovfl();
-//}
 
 void wait_for_byte(void) {
   while( !byte_ready) {/* wait for SPI byte ready*/}
 }
 
 ISR(USI_OVF_vect) {
+  // Interrupt service routine for SPI clock overflow / a byte is ready
+  //   save th eresult in cmd
+  //   set the byte ready flag for the main function code
+  //   clear the interrupt condition
   //PORTB |= (1 << PB3);  // debug
   cmd = USIDR;
   byte_ready = true;
@@ -174,38 +172,34 @@ int main() {
   init_registers();           // initialize SPI mode and interrupts
   sei();                      // enable SPI OVF interrupts
 
-  while(true) {
-    wait_for_ss();            // Wait for Chip Select to go low / selected then...
+  while(true) {               // loop forever
+   
+    wait_for_ss();            // Wait for Chip Select to go low / selected
+                              //  ......... waiting ......... then
     reset_ovfl();             //  reset ovfl interrupt and initialize clk counter
     DDRB |= (1 << PB1);       //  set miso pin to output while SS is low
     byte_ready = false;       //  clear byte ready flag, prepare for next SPI byte
 
-    while (chip_select()) {   // while SS is low
+    while (chip_select()) {   // while SS is low / selected
       
       wait_for_byte();        // wait for next SPI byte
 
-/******** This code processes PLL data but is not necessary as the default else block below
- *        essentially does the same thing
+/******** This code processes PLL data but is not necessary as the default 
+ *        else block below essentially does the same thing
  * 
-      if (cmd == CMD_PLL) {
+      if (cmd == CMD_PLL) {         // 0xD2 signifies a 12 byte PLL packet
         // echo back 12 bytes
-        //PORTB |= (1<<PB3);
-        for (int i = 0;i<8;i++){
+        //PORTB |= (1<<PB3);        // debug
+        for (int i = 0;i<12;i++){
           wait_for_byte();
           USIDR=cmd;
           byte_ready = false;
         }
-        for (int i=0;i<4;i++){
-          wait_for_byte();
-          USIDR=0x00;
-          byte_ready = false;
-        }
-        //PORTB &= ~(1 << PB3);
+        //PORTB &= ~(1 << PB3);     // debug
       }
 */
       if (cmd == CMD_STATUS) {        // 0xDC
         // PORTB |= (1<<PB3);         // debug: set pin PB3
-        //wait_for_byte();
         USIDR = RESPONSE_STATUS;      // return 0x8C which is presumably "all good"
         byte_ready = false;
         // PORTB &= ~(1 << PB3);      // debug: reset ping PB3
