@@ -31,11 +31,12 @@ Data:        133 bytes
 #include <avr/io.h>
 #include <stdlib.h>
 #include <avr/pgmspace.h>
-//#include <avr/interrupt.h>
+#include <avr/interrupt.h>
 
 #define CMD_STATUS      0xD7  // Chip status command
-#define CMD_STATUS_REV  0xEB  // Chip status command
+//#define CMD_STATUS_REV  0xEB  // Chip status command
 #define CMD_SECURITY    0x77  // Dump security register command
+#define CMD_PLL         0xD2  // PLL loop, 12 byte packets
 #define CMD_DEVICEID    0x9F  // Manufacturer & Device ID command
 #define RESPONSE_STATUS 0x8C  // Response to CMD_STATUS
 
@@ -43,7 +44,9 @@ Data:        133 bytes
 #define POCI _BV(PB1)
 #define OVFL _BV(USIOIF)      // create byte representation os USISR bit 6
 
-uint8_t cmd = 0x0;
+//bool logged_on = false;
+volatile bool byte_ready = false;
+volatile uint8_t cmd = 0x0;
 
 // Static look-up table for security register
 // Stored in program flash to reduce SRAM usage
@@ -65,6 +68,29 @@ const uint8_t lookup[256] PROGMEM = {
   0xA5, 0xA1, 0xAD, 0xA9, 0xB5, 0xB1, 0xBD, 0xB9, 0x84, 0x80, 0x8C, 0x88, 0x94, 0x90, 0x9C, 0x98,
   0xE3, 0xE7, 0xEB, 0xEF, 0xF3, 0xF7, 0xFB, 0xFF, 0xC2, 0xC6, 0xCA, 0xCE, 0xD2, 0xD6, 0xDA, 0xDE
 };
+
+/*
+* This code will use a fixed security response instead of a randoom response
+* Both methods appear to work but the randon esponse is "cooler" :-)
+*
+const uint8_t SECURITY_REGISTER_DATA[128] = {
+0x80, 0x2D, 0x22, 0x6F, 0x52, 0x6F, 0x98, 0xA9, 0x21, 0x25, 0x5E, 0x2D, 0x2D, 0x31, 0xD2, 0x39,
+0x18, 0x1C, 0x63, 0x0C, 0x31, 0x21, 0x2D, 0x39, 0x90, 0xDE, 0x94, 0x6F, 0x6B, 0x77, 0x73, 0x7F,
+0x63, 0x8C, 0x88, 0x84, 0x80, 0x9C, 0x98, 0x94, 0x90, 0xAD, 0xA9, 0xA5, 0xA1, 0xBD, 0xB9, 0xB5,
+0xB1, 0xCA, 0xCE, 0xC2, 0xC6, 0xDA, 0xDE, 0xD2, 0xD6, 0xEB, 0xEF, 0xE3, 0xE7, 0xFB, 0xFF, 0xF3,
+0x0B, 0x02, 0x16, 0x17, 0x11, 0x15, 0x1F, 0x22, 0x00, 0x00, 0x46, 0x00, 0xFF, 0xFF, 0xAC, 0xFF,
+0x30, 0x30, 0x4D, 0x32, 0x36, 0x39, 0x37, 0x31, 0x0F, 0x1C, 0x0C, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+0x3F, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF
+};
+
+void init_fixed_response(void) {
+  
+  for (int i=0;i<128;i++){
+    response[i] = SECURITY_REGISTER_DATA[i];
+  }
+}
+*/
 
 uint8_t response[128];                      // pre-built response to validation request
 
@@ -103,62 +129,117 @@ void init_registers() {
   //Config PortB.2 = Input  PB2 = Clock
   //Config PortB.4 = Input  PB4 = SS
 
-  DDRB = POCI;                      //Set direction for PB1 / POCI
-  USICR=(1<<USIWM0) | (1<<USICS1);  // Configure USI to 3 wire SPI Mode 0
+  DDRB  = (1<<PB3);                                   // PB3 is debug oin
+  PORTB = (1<<PB1) | (1<<PB2) | (1<<PB4);            // Pullups
+
+  USICR = (1<<USIWM0) | (1<<USICS1) | (1<< USIOIE);  // Configure USI to 3 wire SPI Mode 0
+  USIDR = 0;
 }
 
-//void wait_for_ss(void) {
-//  while (PORTB & SS) { /* wait for Select to go low */ }/
-//}
+void wait_for_ss(void) {
+  while (PINB & SS) { /* wait for Select to go low */ }
+}
 
 bool chip_select(void) {
-  return(!(PORTB & SS));  /* wait for Select to go low */
-}
-
-void wait_for_spi(void) {
-  while( !(USISR & OVFL)) {/* wait for SPI byte ready*/}
-  cmd = USIDR;
+  return(!(PINB & SS));  /* wait for Select to go low */
 }
 
 void reset_ovfl(void) {
   USISR = OVFL;   // reset USIOIE flag (counter overflow / byte ready)
 }
 
+//void wait_for_spi(void) {
+//  while( !(USISR & OVFL)) {/* wait for SPI byte ready*/}
+//  cmd = USIDR;
+//  reset_ovfl();
+//}
+
+void wait_for_byte(void) {
+  while( !byte_ready) {/* wait for SPI byte ready*/}
+}
+
+ISR(USI_OVF_vect) {
+  //PORTB |= (1 << PB3);  // debug
+  cmd = USIDR;
+  byte_ready = true;
+  USISR = 0b01000000;
+  //PORTB &= ~(1 << PB3); // debug
+}
+
+
 int main() {
 
-  init_response();
-  init_registers();
- 
-  while(true) {
-    
-    //wait_for_ss();
-    while (chip_select()) {
-    
-      wait_for_spi();                 // wait for a SPI byte from console
-                                      // byte returned in cmd
+  cli();                      // disable interrupts during setup
+  init_response();            // initialize the security response buffer
+  init_registers();           // initialize SPI mode and interrupts
+  sei();                      // enable SPI OVF interrupts
 
-      if (cmd == CMD_STATUS) {        // 0xD7
-        USIDR = RESPONSE_STATUS;      // 0x8C
-        reset_ovfl();
+  while(true) {
+    wait_for_ss();            // Wait for Chip Select to go low / selected then...
+    reset_ovfl();             //  reset ovfl interrupt and initialize clk counter
+    DDRB |= (1 << PB1);       //  set miso pin to output while SS is low
+    byte_ready = false;       //  clear byte ready flag, prepare for next SPI byte
+
+    while (chip_select()) {   // while SS is low
+      
+      wait_for_byte();        // wait for next SPI byte
+
+/******** This code processes PLL data but is not necessary as the default else block below
+ *        essentially does the same thing
+ * 
+      if (cmd == CMD_PLL) {
+        // echo back 12 bytes
+        //PORTB |= (1<<PB3);
+        for (int i = 0;i<8;i++){
+          wait_for_byte();
+          USIDR=cmd;
+          byte_ready = false;
+        }
+        for (int i=0;i<4;i++){
+          wait_for_byte();
+          USIDR=0x00;
+          byte_ready = false;
+        }
+        //PORTB &= ~(1 << PB3);
+      }
+*/
+      if (cmd == CMD_STATUS) {        // 0xDC
+        // PORTB |= (1<<PB3);         // debug: set pin PB3
+        //wait_for_byte();
+        USIDR = RESPONSE_STATUS;      // return 0x8C which is presumably "all good"
+        byte_ready = false;
+        // PORTB &= ~(1 << PB3);      // debug: reset ping PB3
       } 
     
       else if (cmd == CMD_SECURITY){  // 0x77
         // first receive / send three 0x00 bytes to emulate
         // the "expected" flash memory chip
+        // PORTB |= (1<<PB3);         // debug:
         for (int i=0;i<3;i++) {
+          wait_for_byte();
           USIDR = 0x00;
-          reset_ovfl();
-          wait_for_spi();
+          byte_ready = false;
         }
-
         // next send the 128 byte security challenge response
         // created earlier
         for (int i=0;i<128;i++) {
+          wait_for_byte();
           USIDR = response[i];
-          reset_ovfl();
-          wait_for_spi();
-        }      
+          byte_ready = false;;
+        }
+        // PORTB &= ~(1 << PB3);      // debug:
       } // end of cmd == CMD_SECURITY
+
+      else{                           // just echo back for all other bytes 
+        USIDR = cmd;
+        byte_ready = false;
+      }    
+
     } // end of while chip_select
+
+    // This absolutely required othewrwise the console generates a PLL not locked error
+    DDRB &= ~(1<<PB1);  // Set MISO to input / Hi-Z
+    PORTB |= (1<<PB1);  // with pullup
+
   } // end of while true / outer loop
 }
